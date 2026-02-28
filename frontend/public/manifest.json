@@ -1,0 +1,16 @@
+{
+  "name": "Bookmarks — Book Excerpt Feed",
+  "short_name": "Bookmarks",
+  "description": "A personal feed of meaningful book excerpts.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#fafaf9",
+  "theme_color": "#f43f5e",
+  "icons": [
+    {
+      "src": "/favicon.ico",
+      "sizes": "any",
+      "type": "image/x-icon"
+    }
+  ]
+}
