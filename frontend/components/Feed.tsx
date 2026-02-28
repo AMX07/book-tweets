@@ -1,66 +1,52 @@
 "use client";
 
-import { useCallback } from "react";
-import useSWRInfinite from "swr/infinite";
+import { useCallback, useEffect, useState } from "react";
 import ExcerptCard from "./ExcerptCard";
 import LoadingSkeleton from "./LoadingSkeleton";
 import { useInfiniteScroll } from "@/hooks/useInfiniteScroll";
-import type { FeedResponse } from "@/types";
+import { initStore, getRankedFeed, recordImpression } from "@/lib/store";
+import type { Excerpt } from "@/types";
 
-const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 const PAGE_SIZE = 10;
 
-function fetcher(url: string) {
-  return fetch(url).then((r) => {
-    if (!r.ok) throw new Error("Failed to fetch feed");
-    return r.json();
-  });
-}
-
 export default function Feed() {
-  const { data, error, size, setSize, isLoading, isValidating } = useSWRInfinite<FeedResponse>(
-    (pageIndex) => `${API}/api/feed?page=${pageIndex + 1}&page_size=${PAGE_SIZE}`,
-    fetcher,
-    { revalidateFirstPage: false }
-  );
+  const [excerpts, setExcerpts] = useState<Excerpt[]>([]);
+  const [page, setPage] = useState(1);
+  const [hasMore, setHasMore] = useState(true);
+  const [isLoading, setIsLoading] = useState(true);
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
 
-  const allExcerpts = data ? data.flatMap((page) => page.excerpts) : [];
-  const hasMore = data ? data[data.length - 1]?.has_more : false;
-  const isLoadingMore = isValidating && size > 1;
-
-  const loadMore = useCallback(() => {
-    if (!isLoadingMore && hasMore) {
-      setSize((s) => s + 1);
-    }
-  }, [isLoadingMore, hasMore, setSize]);
-
-  const sentinelRef = useInfiniteScroll(loadMore, hasMore && !isLoadingMore);
-
-  // Record impressions for shown excerpts (fire-and-forget)
-  const recordImpression = useCallback((excerptId: number) => {
-    fetch(`${API}/api/excerpts/${excerptId}/impression`, { method: "POST" }).catch(() => {});
+  // Initialise the store (seeds localStorage if empty) then load first page
+  useEffect(() => {
+    initStore();
+    const result = getRankedFeed(1, PAGE_SIZE);
+    setExcerpts(result.excerpts);
+    setHasMore(result.hasMore);
+    setIsLoading(false);
   }, []);
 
-  if (error) {
-    return (
-      <div className="text-center py-16 text-gray-500">
-        <p className="text-lg mb-2">Could not load your feed</p>
-        <p className="text-sm">Make sure the backend is running on port 8000</p>
-      </div>
-    );
-  }
+  const loadMore = useCallback(() => {
+    if (isLoadingMore || !hasMore) return;
+    setIsLoadingMore(true);
+    const nextPage = page + 1;
+    const result = getRankedFeed(nextPage, PAGE_SIZE);
+    setExcerpts((prev) => [...prev, ...result.excerpts]);
+    setHasMore(result.hasMore);
+    setPage(nextPage);
+    setIsLoadingMore(false);
+  }, [page, hasMore, isLoadingMore]);
+
+  const sentinelRef = useInfiniteScroll(loadMore, hasMore && !isLoadingMore);
 
   if (isLoading) {
     return (
       <div className="space-y-4">
-        {Array.from({ length: 5 }).map((_, i) => (
-          <LoadingSkeleton key={i} />
-        ))}
+        {Array.from({ length: 5 }).map((_, i) => <LoadingSkeleton key={i} />)}
       </div>
     );
   }
 
-  if (allExcerpts.length === 0) {
+  if (excerpts.length === 0) {
     return (
       <div className="text-center py-20 text-gray-500">
         <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" className="w-12 h-12 mx-auto mb-4 fill-stone-200">
@@ -68,8 +54,7 @@ export default function Feed() {
         </svg>
         <p className="text-lg font-medium mb-1">No excerpts yet</p>
         <p className="text-sm">
-          <a href="/import" className="underline text-rose-500">Import from Readwise</a> or run{" "}
-          <code className="bg-stone-100 px-1 rounded text-xs">python seed.py</code> to add sample excerpts.
+          <a href="import" className="underline text-rose-500">Import from Readwise</a> to add your Kindle highlights.
         </p>
       </div>
     );
@@ -77,10 +62,9 @@ export default function Feed() {
 
   return (
     <div className="space-y-4">
-      {allExcerpts.map((excerpt) => (
+      {excerpts.map((excerpt) => (
         <div
           key={excerpt.id}
-          // Intersection observer for impressions (fires once per render)
           ref={(el) => {
             if (!el) return;
             const obs = new IntersectionObserver(
@@ -99,18 +83,15 @@ export default function Feed() {
         </div>
       ))}
 
-      {/* Infinite scroll sentinel */}
       <div ref={sentinelRef} className="h-1" />
 
       {isLoadingMore && (
         <div className="space-y-4">
-          {Array.from({ length: 3 }).map((_, i) => (
-            <LoadingSkeleton key={i} />
-          ))}
+          {Array.from({ length: 3 }).map((_, i) => <LoadingSkeleton key={i} />)}
         </div>
       )}
 
-      {!hasMore && allExcerpts.length > 0 && (
+      {!hasMore && excerpts.length > 0 && (
         <p className="text-center text-stone-400 text-sm py-8">
           You&apos;ve seen all your excerpts · Like more to refine your feed
         </p>

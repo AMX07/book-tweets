@@ -1,10 +1,99 @@
 "use client";
 
 import { useState } from "react";
-
-const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+import { addExcerpts } from "@/lib/store";
+import type { Excerpt } from "@/types";
 
 type Status = { type: "idle" | "loading" | "success" | "error"; message?: string };
+
+// ─── Readwise (browser-side) ─────────────────────────────────────────────────
+
+async function fetchAllReadwise(token: string): Promise<Omit<Excerpt, "id" | "liked" | "like_count">[]> {
+  const headers = { Authorization: `Token ${token}` };
+
+  async function paginate(url: string): Promise<unknown[]> {
+    const results: unknown[] = [];
+    let next: string | null = url;
+    while (next) {
+      const res = await fetch(next, { headers });
+      if (!res.ok) throw new Error(`Readwise API error ${res.status}: ${await res.text()}`);
+      const data = await res.json() as { results: unknown[]; next: string | null };
+      results.push(...data.results);
+      next = data.next;
+    }
+    return results;
+  }
+
+  const books = await paginate("https://readwise.io/api/v2/books/?category=books") as Array<{
+    id: number; title: string; author: string; cover_image_url?: string;
+  }>;
+
+  const excerpts: Omit<Excerpt, "id" | "liked" | "like_count">[] = [];
+
+  for (const book of books) {
+    const highlights = await paginate(
+      `https://readwise.io/api/v2/highlights/?book_id=${book.id}`
+    ) as Array<{ text: string; location?: number; tags?: { name: string }[] }>;
+
+    for (const h of highlights) {
+      if (!h.text?.trim()) continue;
+      excerpts.push({
+        book_id: book.id,
+        text: h.text.trim(),
+        page_number: h.location,
+        tags: (h.tags ?? []).map((t) => t.name),
+        source: "readwise",
+        book_title: book.title ?? "Unknown Title",
+        book_author: book.author ?? "Unknown Author",
+        book_cover_url: book.cover_image_url,
+      });
+    }
+  }
+
+  return excerpts;
+}
+
+// ─── My Clippings.txt (browser-side) ────────────────────────────────────────
+
+function parseClippings(content: string): Omit<Excerpt, "id" | "liked" | "like_count">[] {
+  const SEPARATOR = "==========";
+  const entries = content.split(SEPARATOR).map((e) => e.trim()).filter(Boolean);
+  const results: Omit<Excerpt, "id" | "liked" | "like_count">[] = [];
+  let nextBookId = Date.now(); // stable-ish temporary ID
+
+  for (const entry of entries) {
+    const lines = entry.split("\n").map((l) => l.trim()).filter(Boolean);
+    if (lines.length < 3) continue;
+
+    const [titleLine, metaLine, ...textLines] = lines;
+    if (metaLine.includes("Your Bookmark") || metaLine.includes("Your Note")) continue;
+
+    const text = textLines.join(" ").trim();
+    if (!text || text.length < 10) continue;
+
+    const titleMatch = titleLine.match(/^(.+?)\s*\(([^)]+)\)\s*$/);
+    const title = titleMatch ? titleMatch[1].trim() : titleLine.trim();
+    const author = titleMatch ? titleMatch[2].trim() : "Unknown";
+
+    const pageMatch = metaLine.match(/page\s+(\d+)/i);
+    const page_number = pageMatch ? parseInt(pageMatch[1]) : undefined;
+
+    results.push({
+      book_id: nextBookId++,
+      text,
+      page_number,
+      tags: [],
+      source: "clippings",
+      book_title: title,
+      book_author: author,
+      book_cover_url: undefined,
+    });
+  }
+
+  return results;
+}
+
+// ─── Page Component ──────────────────────────────────────────────────────────
 
 export default function ImportPage() {
   const [readwiseToken, setReadwiseToken] = useState("");
@@ -17,19 +106,20 @@ export default function ImportPage() {
     if (!readwiseToken.trim()) return;
     setRwStatus({ type: "loading" });
     try {
-      const res = await fetch(`${API}/api/import/readwise`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ api_token: readwiseToken.trim() }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.detail || "Import failed");
+      const excerpts = await fetchAllReadwise(readwiseToken.trim());
+      const added = addExcerpts(excerpts);
       setRwStatus({
         type: "success",
-        message: `Imported ${data.imported_books} book(s) and ${data.imported_excerpts} highlight(s)!`,
+        message: `Added ${added} new highlight${added !== 1 ? "s" : ""}! ${excerpts.length - added > 0 ? `(${excerpts.length - added} already existed)` : ""}`,
       });
     } catch (err: unknown) {
-      setRwStatus({ type: "error", message: err instanceof Error ? err.message : "Unknown error" });
+      const msg = err instanceof Error ? err.message : "Unknown error";
+      setRwStatus({
+        type: "error",
+        message: msg.includes("Failed to fetch")
+          ? "Could not reach Readwise — your browser may be blocking the request. Try disabling ad blockers for this page."
+          : msg,
+      });
     }
   }
 
@@ -38,14 +128,12 @@ export default function ImportPage() {
     if (!clippingsFile) return;
     setClippingsStatus({ type: "loading" });
     try {
-      const form = new FormData();
-      form.append("file", clippingsFile);
-      const res = await fetch(`${API}/api/import/clippings`, { method: "POST", body: form });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.detail || "Import failed");
+      const text = await clippingsFile.text();
+      const excerpts = parseClippings(text);
+      const added = addExcerpts(excerpts);
       setClippingsStatus({
         type: "success",
-        message: `Imported ${data.imported_books} book(s) and ${data.imported_excerpts} highlight(s)!`,
+        message: `Added ${added} new highlight${added !== 1 ? "s" : ""}! ${excerpts.length - added > 0 ? `(${excerpts.length - added} already existed)` : ""}`,
       });
     } catch (err: unknown) {
       setClippingsStatus({ type: "error", message: err instanceof Error ? err.message : "Unknown error" });
@@ -57,11 +145,11 @@ export default function ImportPage() {
       <div>
         <h1 className="text-2xl font-bold text-gray-900">Import Highlights</h1>
         <p className="text-gray-500 mt-1 text-sm">
-          Bring in your Kindle highlights to populate your feed.
+          All data is stored in your browser — nothing leaves your device.
         </p>
       </div>
 
-      {/* Readwise import */}
+      {/* Readwise */}
       <section className="bg-white rounded-2xl border border-stone-100 p-6 shadow-sm space-y-4">
         <div className="flex items-center gap-3">
           <div className="w-10 h-10 rounded-xl bg-amber-50 flex items-center justify-center">
@@ -76,9 +164,9 @@ export default function ImportPage() {
         </div>
 
         <ol className="text-sm text-gray-600 space-y-1 list-decimal list-inside">
-          <li>Go to <strong>readwise.io/access_token</strong> to get your token</li>
-          <li>Make sure the Readwise browser extension has synced your Kindle highlights</li>
-          <li>Paste your token below and click Import</li>
+          <li>Sign in at <strong>readwise.io</strong> and install their browser extension to sync Kindle</li>
+          <li>Go to <strong>readwise.io/access_token</strong> to copy your token</li>
+          <li>Paste it below and click Import</li>
         </ol>
 
         <form onSubmit={importReadwise} className="space-y-3">
@@ -97,30 +185,28 @@ export default function ImportPage() {
             {rwStatus.type === "loading" ? "Importing…" : "Import from Readwise"}
           </button>
         </form>
-
         <StatusMessage status={rwStatus} />
       </section>
 
-      {/* My Clippings.txt import */}
+      {/* My Clippings.txt */}
       <section className="bg-white rounded-2xl border border-stone-100 p-6 shadow-sm space-y-4">
         <div className="flex items-center gap-3">
           <div className="w-10 h-10 rounded-xl bg-stone-100 flex items-center justify-center">
             <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" className="w-5 h-5 fill-stone-500">
-              <path d="M11.625 16.5a1.875 1.875 0 1 0 0-3.75 1.875 1.875 0 0 0 0 3.75Z" />
               <path fillRule="evenodd" d="M5.625 1.5H9a3.75 3.75 0 0 1 3.75 3.75v1.875c0 1.036.84 1.875 1.875 1.875H16.5a3.75 3.75 0 0 1 3.75 3.75v7.875c0 1.035-.84 1.875-1.875 1.875H5.625a1.875 1.875 0 0 1-1.875-1.875V3.375c0-1.036.84-1.875 1.875-1.875Zm6 16.5c.66 0 1.277-.19 1.797-.518l1.048 1.048a.75.75 0 0 0 1.06-1.06l-1.047-1.048A3.375 3.375 0 1 0 11.625 18Z" clipRule="evenodd" />
               <path d="M14.25 5.25a5.23 5.23 0 0 0-1.279-3.434 9.768 9.768 0 0 1 6.963 6.963A5.23 5.23 0 0 0 16.5 7.5h-1.875a.375.375 0 0 1-.375-.375V5.25Z" />
             </svg>
           </div>
           <div>
             <h2 className="font-semibold text-gray-900">My Clippings.txt</h2>
-            <p className="text-xs text-gray-500">Upload the file from your physical Kindle device</p>
+            <p className="text-xs text-gray-500">Upload from your physical Kindle device</p>
           </div>
         </div>
 
         <ol className="text-sm text-gray-600 space-y-1 list-decimal list-inside">
           <li>Connect your Kindle to your computer via USB</li>
           <li>Find <code className="bg-stone-100 px-1 rounded text-xs">documents/My Clippings.txt</code></li>
-          <li>Upload it below</li>
+          <li>Upload it below — parsing happens entirely in your browser</li>
         </ol>
 
         <form onSubmit={importClippings} className="space-y-3">
@@ -146,10 +232,9 @@ export default function ImportPage() {
             disabled={clippingsStatus.type === "loading" || !clippingsFile}
             className="w-full bg-gray-900 hover:bg-gray-700 text-white font-medium py-2.5 rounded-xl text-sm transition-colors disabled:opacity-50"
           >
-            {clippingsStatus.type === "loading" ? "Importing…" : "Import Clippings"}
+            {clippingsStatus.type === "loading" ? "Parsing…" : "Import Clippings"}
           </button>
         </form>
-
         <StatusMessage status={clippingsStatus} />
       </section>
     </div>

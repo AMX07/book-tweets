@@ -1,8 +1,7 @@
 "use client";
 
 import { useState } from "react";
-
-const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+import { toggleLike } from "@/lib/store";
 
 interface LikeButtonProps {
   excerptId: number;
@@ -13,37 +12,19 @@ interface LikeButtonProps {
 export default function LikeButton({ excerptId, initialLiked, initialCount }: LikeButtonProps) {
   const [liked, setLiked] = useState(initialLiked);
   const [count, setCount] = useState(initialCount);
-  const [loading, setLoading] = useState(false);
 
-  async function toggle() {
-    if (loading) return;
-
-    // Optimistic update
-    const newLiked = !liked;
-    setLiked(newLiked);
-    setCount((c) => c + (newLiked ? 1 : -1));
-    setLoading(true);
-
-    try {
-      const method = newLiked ? "POST" : "DELETE";
-      await fetch(`${API}/api/excerpts/${excerptId}/like`, { method });
-    } catch {
-      // Revert on failure
-      setLiked(!newLiked);
-      setCount((c) => c + (newLiked ? -1 : 1));
-    } finally {
-      setLoading(false);
-    }
+  function toggle() {
+    const nowLiked = toggleLike(excerptId);
+    setLiked(nowLiked);
+    setCount((c) => Math.max(0, c + (nowLiked ? 1 : -1)));
   }
 
   return (
     <button
       onClick={toggle}
-      disabled={loading}
       aria-label={liked ? "Unlike" : "Like"}
-      className={`flex items-center gap-1.5 text-sm transition-all duration-150 select-none
+      className={`flex items-center gap-1.5 text-sm transition-all duration-150 select-none cursor-pointer
         ${liked ? "text-rose-500" : "text-gray-400 hover:text-rose-400"}
-        ${loading ? "opacity-60 cursor-wait" : "cursor-pointer"}
       `}
     >
       <svg
